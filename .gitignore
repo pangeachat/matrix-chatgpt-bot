@@ -1,5 +1,5 @@
 # Secrets!
-.env
+.env*
 
 node_modules/
 *.swp
@@ -10,4 +10,4 @@ tsconfig.tsbuildinfo
 .DS_Store
 
 crypto/
-storage/
+storage*/

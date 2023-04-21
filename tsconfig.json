@@ -14,7 +14,8 @@
     "baseUrl": ".",
     "outDir": "dist/",
     "noEmit": false,
-    "types": ["node"]
+    "types": ["node"],
+    "sourceMap": true
   },
   "files": ["src/index.ts"]
 }
