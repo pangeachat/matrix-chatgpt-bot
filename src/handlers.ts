@@ -1,8 +1,11 @@
 import ChatGPTClient from '@waylaidwanderer/chatgpt-api';
-import { LogService, MatrixClient, UserID } from "matrix-bot-sdk";
-import { CHATGPT_CONTEXT, CHATGPT_TIMEOUT, CHATGPT_IGNORE_MEDIA, MATRIX_DEFAULT_PREFIX_REPLY, MATRIX_DEFAULT_PREFIX, MATRIX_BLACKLIST, MATRIX_WHITELIST, MATRIX_RICH_TEXT, MATRIX_PREFIX_DM, MATRIX_THREADS, MATRIX_ROOM_BLACKLIST, MATRIX_ROOM_WHITELIST } from "./env.js";
+import { LogService, MatrixClient, UserID, RoomEvent } from "matrix-bot-sdk";
+import { CHATGPT_CONTEXT, CHATGPT_TIMEOUT, CHATGPT_IGNORE_MEDIA, MATRIX_DEFAULT_PREFIX_REPLY, MATRIX_DEFAULT_PREFIX, MATRIX_BLACKLIST, MATRIX_WHITELIST, MATRIX_RICH_TEXT, MATRIX_PREFIX_DM, MATRIX_THREADS, MATRIX_ROOM_BLACKLIST, MATRIX_ROOM_WHITELIST, CHATGPT_PROMPT_PREFIX } from "./env.js";
 import { RelatesTo, MessageEvent, StoredConversation, StoredConversationConfig } from "./interfaces.js";
 import { sendChatGPTMessage, sendError, sendReply } from "./utils.js";
+
+import { ChatOpenAI } from "langchain/chat_models/openai";
+import { HumanChatMessage, SystemChatMessage, AIChatMessage } from "langchain/schema";
 
 export default class CommandHandler {
 
@@ -10,6 +13,7 @@ export default class CommandHandler {
   private displayName: string;
   private userId: string;
   private localpart: string;
+  private langchain: ChatOpenAI = new ChatOpenAI()
 
   constructor(private client: MatrixClient, private chatGPT: ChatGPTClient) { }
 
@@ -98,6 +102,16 @@ export default class CommandHandler {
     return event.content.body.slice(trimLength).trimStart();
   }
 
+  private createLangchainArray(roomEvent:RoomEvent) {
+    const content:string = roomEvent.content ? String(roomEvent.content['body']) : "";
+    switch (roomEvent.sender){
+      case this.userId:
+        return new AIChatMessage(content);
+      default:
+        return new HumanChatMessage(content);
+    }
+  }
+
   /**
    * Run when `message` room event is received. The bot only sends a message if needed.
    * @returns Room event handler, which itself returns nothing
@@ -109,38 +123,56 @@ export default class CommandHandler {
         return;
       }
 
-      const storageKey = this.getStorageKey(event, roomId);
-      const storedConversation = await this.getStoredConversation(storageKey, roomId);
-      const config = this.getConfig(storedConversation);
+      // const storageKey = this.getStorageKey(event, roomId);
+      // const storedConversation = await this.getStoredConversation(storageKey, roomId);
+      // const config = this.getConfig(storedConversation);
 
-      const shouldBePrefixed = await this.shouldBePrefixed(config, roomId, event)
-      if (!shouldBePrefixed) return;
+      // Langchain ---
+      const roomContext = await this.client.getEventContext(roomId, event.event_id, 100);
+      const messages = roomContext.before.filter(e => ((e.type == 'm.room.message') && (Date.now() - e.timestamp < 5400000)));
+      const langchainArray = messages.map(this.createLangchainArray, this);
+
+      langchainArray.push(new SystemChatMessage(CHATGPT_PROMPT_PREFIX))
+      langchainArray.reverse()
+      langchainArray.push(new HumanChatMessage(event.content.body))
+      // ---
+
+      // const shouldBePrefixed = await this.shouldBePrefixed(config, roomId, event);
+      // if (!shouldBePrefixed) return;
 
       await Promise.all([
         this.client.sendReadReceipt(roomId, event.event_id),
         this.client.setTyping(roomId, true, CHATGPT_TIMEOUT)
       ]);
 
-      const bodyWithoutPrefix = this.getBodyWithoutPrefix(event, config, shouldBePrefixed);
-      if (!bodyWithoutPrefix) {
-        await sendError(this.client, "Error with body: " + event.content.body, roomId, event.event_id);
-        return;
-      }
-
-      const result = await sendChatGPTMessage(this.chatGPT, await bodyWithoutPrefix, storedConversation)
-        .catch((error) => {
-          LogService.error(`OpenAI-API Error: ${error}`);
-          sendError(this.client, `The bot has encountered an error, please contact your administrator (Error code ${error.status || "Unknown"}).`, roomId, event.event_id);
-      });
+      // Langchain
+      const ai_response = await this.langchain.call(langchainArray)
       await Promise.all([
         this.client.setTyping(roomId, false, 500),
-        sendReply(this.client, roomId, this.getRootEventId(event), `${result.response}`, MATRIX_THREADS, MATRIX_RICH_TEXT)
+        sendReply(this.client, roomId, this.getRootEventId(event), `${ai_response.text}`, MATRIX_THREADS, MATRIX_RICH_TEXT)
       ]);
 
-      const storedConfig = ((storedConversation !== undefined && storedConversation.config !== undefined) ? storedConversation.config : {})
-      const configString: string = JSON.stringify({conversationId: result.conversationId, messageId: result.messageId, config: storedConfig})
-      await this.client.storageProvider.storeValue('gpt-' + storageKey, configString);
-      if ((storageKey === roomId) && (CHATGPT_CONTEXT === "both")) await this.client.storageProvider.storeValue('gpt-' + event.event_id, configString);
+      // const bodyWithoutPrefix = this.getBodyWithoutPrefix(event, config, shouldBePrefixed);
+      // if (!bodyWithoutPrefix) {
+      //   await sendError(this.client, "Error with body: " + event.content.body, roomId, event.event_id);
+      //   return;
+      // }
+
+      // const result = await sendChatGPTMessage(this.chatGPT, await bodyWithoutPrefix, storedConversation)
+      //   .catch((error) => {
+      //     LogService.error(`OpenAI-API Error: ${error}`);
+      //     sendError(this.client, `The bot has encountered an error, please contact your administrator (Error code ${error.status || "Unknown"}).`, roomId, event.event_id);
+      // });
+
+      // await Promise.all([
+      //   this.client.setTyping(roomId, false, 500),
+      //   sendReply(this.client, roomId, this.getRootEventId(event), `${result.response}`, MATRIX_THREADS, MATRIX_RICH_TEXT)
+      // ]);
+
+      // const storedConfig = ((storedConversation !== undefined && storedConversation.config !== undefined) ? storedConversation.config : {})
+      // const configString: string = JSON.stringify({conversationId: result.conversationId, messageId: result.messageId, config: storedConfig})
+      // await this.client.storageProvider.storeValue('gpt-' + storageKey, configString);
+      // if ((storageKey === roomId) && (CHATGPT_CONTEXT === "both")) await this.client.storageProvider.storeValue('gpt-' + event.event_id, configString);
     } catch (err) {
       console.error(err);
     }
