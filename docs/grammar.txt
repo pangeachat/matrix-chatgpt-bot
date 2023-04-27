@@ -1,0 +1,3 @@
+Messages are checked for grammar errors. 
+A red underline means a potential error. 
+Click the text to resolve the error or ignore.

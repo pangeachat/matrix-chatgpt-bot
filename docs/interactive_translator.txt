@@ -1,0 +1,4 @@
+The interactive translator helps beginners use their target language. 
+To use the interactive translator, simply type a message in your base language, and the app will prompt you to try interactive translation. 
+You will be presented with options at each step, some correct, some incorrect. 
+At the end, you’ll get feedback on your translation!

@@ -1,11 +1,25 @@
-import ChatGPTClient from '@waylaidwanderer/chatgpt-api';
 import { LogService, MatrixClient, UserID, RoomEvent } from "matrix-bot-sdk";
-import { CHATGPT_CONTEXT, CHATGPT_TIMEOUT, CHATGPT_IGNORE_MEDIA, MATRIX_DEFAULT_PREFIX_REPLY, MATRIX_DEFAULT_PREFIX, MATRIX_BLACKLIST, MATRIX_WHITELIST, MATRIX_RICH_TEXT, MATRIX_PREFIX_DM, MATRIX_THREADS, MATRIX_ROOM_BLACKLIST, MATRIX_ROOM_WHITELIST, CHATGPT_PROMPT_PREFIX } from "./env.js";
-import { RelatesTo, MessageEvent, StoredConversation, StoredConversationConfig } from "./interfaces.js";
-import { sendChatGPTMessage, sendError, sendReply } from "./utils.js";
+import { CHATGPT_CONTEXT, CHATGPT_TIMEOUT, CHATGPT_IGNORE_MEDIA, MATRIX_DEFAULT_PREFIX_REPLY, MATRIX_DEFAULT_PREFIX, MATRIX_BLACKLIST, MATRIX_WHITELIST, MATRIX_RICH_TEXT, MATRIX_PREFIX_DM, MATRIX_THREADS, MATRIX_ROOM_BLACKLIST, MATRIX_ROOM_WHITELIST, CHATGPT_PROMPT_PREFIX, PANGEA_CLASSIFIER_PROMPT } from "./env.js";
+import { RelatesTo, MessageEvent} from "./interfaces.js";
+import { sendError, sendReply } from "./utils.js";
 
 import { ChatOpenAI } from "langchain/chat_models/openai";
-import { HumanChatMessage, SystemChatMessage, AIChatMessage } from "langchain/schema";
+import { HumanChatMessage, SystemChatMessage, AIChatMessage, BaseChatMessage } from "langchain/schema";
+import { OpenAI } from "langchain/llms/openai";
+import {
+  ChatPromptTemplate,
+  HumanMessagePromptTemplate,
+  PromptTemplate,
+  SystemMessagePromptTemplate,
+} from "langchain/prompts";
+import { LLMChain } from "langchain/chains";
+
+import { loadQARefineChain } from "langchain/chains";
+import { TextLoader } from "langchain/document_loaders/fs/text";
+import { DirectoryLoader } from "langchain/document_loaders/fs/directory";
+import { MemoryVectorStore } from "langchain/vectorstores/memory";
+import { OpenAIEmbeddings } from "langchain/embeddings/openai";
+import { Document } from "langchain/dist/document.js";
 
 export default class CommandHandler {
 
@@ -13,9 +27,14 @@ export default class CommandHandler {
   private displayName: string;
   private userId: string;
   private localpart: string;
-  private langchain: ChatOpenAI = new ChatOpenAI()
+  
+  private davinci: OpenAI = new OpenAI({ temperature: 0 , modelName:"text-davinci-003", maxTokens:2});
+  private loader:DirectoryLoader = new DirectoryLoader("docs/",{".txt": (path) => new TextLoader(path)});
+  private docs:Document[];
+  private embeddings:OpenAIEmbeddings = new OpenAIEmbeddings();
+  private store:MemoryVectorStore;
 
-  constructor(private client: MatrixClient, private chatGPT: ChatGPTClient) { }
+  constructor(private client: MatrixClient, private langchain: ChatOpenAI) { }
 
   public async start() {
     await this.prepareProfile();  // Populate the variables above (async)
@@ -23,6 +42,8 @@ export default class CommandHandler {
   }
 
   private async prepareProfile() {
+    this.docs = await this.loader.load();
+    this.store = await MemoryVectorStore.fromDocuments(this.docs, this.embeddings);
     this.userId = await this.client.getUserId();
     this.localpart = new UserID(this.userId).localpart;
     try {
@@ -51,57 +72,6 @@ export default class CommandHandler {
     return (!isReplyOrThread && relatesTo.event_id !== undefined) ? relatesTo.event_id : event.event_id;
   }
 
-  private getStorageKey(event: MessageEvent, roomId: string): string {
-    const rootEventId: string = this.getRootEventId(event)
-    if (CHATGPT_CONTEXT == "room") {
-      return roomId
-    } else if (CHATGPT_CONTEXT == "thread") {
-      return rootEventId
-    } else {  // CHATGPT_CONTEXT set to both.
-      return (rootEventId !== event.event_id) ? rootEventId : roomId;
-    }
-  }
-
-  private async getStoredConversation(storageKey: string, roomId: string): Promise<StoredConversation> {
-    let storedValue: string = await this.client.storageProvider.readValue('gpt-' + storageKey)
-    if (storedValue == undefined && storageKey != roomId) storedValue = await this.client.storageProvider.readValue('gpt-' + roomId)
-    return (storedValue !== undefined) ? JSON.parse(storedValue) : undefined;
-  }
-
-  private getConfig(storedConversation: StoredConversation): StoredConversationConfig {
-    return (storedConversation !== undefined && storedConversation.config !== undefined) ? storedConversation.config : {};
-  }
-
-  private async shouldBePrefixed(config: StoredConversationConfig, roomId: string, event: MessageEvent): Promise<boolean> {
-    const relatesTo: RelatesTo | undefined = event.content["m.relates_to"];
-    const isReplyOrThread: boolean = (relatesTo === undefined);
-    const isDm: boolean = this.client.dms.isDm(roomId);
-    const MATRIX_PREFIX: string = (config.MATRIX_PREFIX === undefined) ? MATRIX_DEFAULT_PREFIX : config.MATRIX_PREFIX
-    const MATRIX_PREFIX_REPLY: boolean = (config.MATRIX_PREFIX_REPLY === undefined) ? MATRIX_DEFAULT_PREFIX_REPLY : config.MATRIX_PREFIX_REPLY
-    let shouldBePrefixed: boolean = (MATRIX_PREFIX && isReplyOrThread) || (MATRIX_PREFIX_REPLY && !isReplyOrThread);
-    if (!MATRIX_PREFIX_DM && isDm) shouldBePrefixed=false
-    const prefixes = [MATRIX_PREFIX, `${this.localpart}:`, `${this.displayName}:`, `${this.userId}:`];
-    if (!isReplyOrThread && !MATRIX_PREFIX_REPLY) {
-      if(relatesTo.event_id !== undefined){
-        const rootEvent: MessageEvent = await this.client.getEvent(roomId, relatesTo.event_id) // relatesTo is root event.
-        const rootPrefixUsed = prefixes.find(p => rootEvent.content.body.startsWith(p));
-        if (!rootPrefixUsed && !(!MATRIX_PREFIX_DM && isDm)) return false;  // Ignore unrelated threads or certain dms
-      } else { // reply not thread, iterating for a prefix not implemented
-        return false;                                                       // Ignore if no relatesTo EventID
-      }
-    }
-    const prefixUsed: string = prefixes.find(p => event.content.body.startsWith(p));
-    if (shouldBePrefixed && !prefixUsed) return false;                      // Ignore without prefix if prefixed
-    return true;
-  }
-
-  private async getBodyWithoutPrefix(event: MessageEvent, config: StoredConversationConfig, shouldBePrefixed: boolean): Promise<string> {
-    const MATRIX_PREFIX: string = (config.MATRIX_PREFIX === undefined) ? MATRIX_DEFAULT_PREFIX : config.MATRIX_PREFIX
-    const prefixUsed: string = [MATRIX_PREFIX, `${this.localpart}:`, `${this.displayName}:`, `${this.userId}:`].find(p => event.content.body.startsWith(p));
-    const trimLength = (shouldBePrefixed && prefixUsed) ? prefixUsed.length : 0;
-    return event.content.body.slice(trimLength).trimStart();
-  }
-
   private createLangchainArray(roomEvent:RoomEvent) {
     const content:string = roomEvent.content ? String(roomEvent.content['body']) : "";
     switch (roomEvent.sender){
@@ -123,11 +93,26 @@ export default class CommandHandler {
         return;
       }
 
-      // const storageKey = this.getStorageKey(event, roomId);
-      // const storedConversation = await this.getStoredConversation(storageKey, roomId);
-      // const config = this.getConfig(storedConversation);
+      await Promise.all([
+        this.client.sendReadReceipt(roomId, event.event_id),
+        this.client.setTyping(roomId, true, CHATGPT_TIMEOUT)
+      ]);
 
-      // Langchain ---
+      // const bool_template = PANGEA_CLASSIFIER_PROMPT;
+      // const bool_prompt = new PromptTemplate({template: bool_template, inputVariables: ["message"] });
+      // const bool_chain = new LLMChain({ llm: this.davinci, prompt:bool_prompt });
+      // const bool_res = await bool_chain.call({ message: event.content.body });
+      // const about_pangea = (bool_res.text.trim().toLowerCase() === 'true');
+
+      let ai_response:string;
+
+      // if (about_pangea) {
+      //   // Run the QA Chain through the available documents
+      //   const relevantDocs = await this.store.similaritySearch(event.content.body);
+      //   const chain = loadQARefineChain(this.langchain);
+      //   const response = await chain.call({input_documents: relevantDocs, question:event.content.body});
+      //   ai_response = response.output_text;
+      // }else{
       const roomContext = await this.client.getEventContext(roomId, event.event_id, 100);
       const messages = roomContext.before.filter(e => ((e.type == 'm.room.message') && (Date.now() - e.timestamp < 5400000)));
       const langchainArray = messages.map(this.createLangchainArray, this);
@@ -135,44 +120,15 @@ export default class CommandHandler {
       langchainArray.push(new SystemChatMessage(CHATGPT_PROMPT_PREFIX))
       langchainArray.reverse()
       langchainArray.push(new HumanChatMessage(event.content.body))
-      // ---
+      const response = await this.langchain.call(langchainArray)
+      ai_response = response.text
+      //}
 
-      // const shouldBePrefixed = await this.shouldBePrefixed(config, roomId, event);
-      // if (!shouldBePrefixed) return;
-
-      await Promise.all([
-        this.client.sendReadReceipt(roomId, event.event_id),
-        this.client.setTyping(roomId, true, CHATGPT_TIMEOUT)
-      ]);
-
-      // Langchain
-      const ai_response = await this.langchain.call(langchainArray)
       await Promise.all([
         this.client.setTyping(roomId, false, 500),
-        sendReply(this.client, roomId, this.getRootEventId(event), `${ai_response.text}`, MATRIX_THREADS, MATRIX_RICH_TEXT)
+        sendReply(this.client, roomId, this.getRootEventId(event), `${ai_response}`, MATRIX_THREADS, MATRIX_RICH_TEXT)
       ]);
 
-      // const bodyWithoutPrefix = this.getBodyWithoutPrefix(event, config, shouldBePrefixed);
-      // if (!bodyWithoutPrefix) {
-      //   await sendError(this.client, "Error with body: " + event.content.body, roomId, event.event_id);
-      //   return;
-      // }
-
-      // const result = await sendChatGPTMessage(this.chatGPT, await bodyWithoutPrefix, storedConversation)
-      //   .catch((error) => {
-      //     LogService.error(`OpenAI-API Error: ${error}`);
-      //     sendError(this.client, `The bot has encountered an error, please contact your administrator (Error code ${error.status || "Unknown"}).`, roomId, event.event_id);
-      // });
-
-      // await Promise.all([
-      //   this.client.setTyping(roomId, false, 500),
-      //   sendReply(this.client, roomId, this.getRootEventId(event), `${result.response}`, MATRIX_THREADS, MATRIX_RICH_TEXT)
-      // ]);
-
-      // const storedConfig = ((storedConversation !== undefined && storedConversation.config !== undefined) ? storedConversation.config : {})
-      // const configString: string = JSON.stringify({conversationId: result.conversationId, messageId: result.messageId, config: storedConfig})
-      // await this.client.storageProvider.storeValue('gpt-' + storageKey, configString);
-      // if ((storageKey === roomId) && (CHATGPT_CONTEXT === "both")) await this.client.storageProvider.storeValue('gpt-' + event.event_id, configString);
     } catch (err) {
       console.error(err);
     }

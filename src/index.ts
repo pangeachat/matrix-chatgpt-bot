@@ -1,5 +1,3 @@
-import ChatGPTClient from '@waylaidwanderer/chatgpt-api';
-import Keyv from 'keyv'
 import { KeyvFile } from 'keyv-file';
 import {
   MatrixAuth, MatrixClient, AutojoinRoomsMixin, LogService, LogLevel, RichConsoleLogger,
@@ -7,6 +5,7 @@ import {
 } from "matrix-bot-sdk";
 
 import * as path from "path";
+import { ChatOpenAI } from "langchain/chat_models/openai";
 import { DATA_PATH, KEYV_URL, OPENAI_API_KEY, MATRIX_HOMESERVER_URL, MATRIX_ACCESS_TOKEN, MATRIX_AUTOJOIN, MATRIX_BOT_PASSWORD, MATRIX_BOT_USERNAME, MATRIX_ENCRYPTION, MATRIX_THREADS, CHATGPT_CONTEXT, CHATGPT_API_MODEL, KEYV_BOT_STORAGE, KEYV_BACKEND, CHATGPT_PROMPT_PREFIX, MATRIX_WELCOME } from './env.js'
 import CommandHandler from "./handlers.js"
 import { KeyvStorageProvider } from './storage.js'
@@ -42,6 +41,7 @@ async function main() {
     console.log("Set MATRIX_ACCESS_TOKEN to above token, MATRIX_BOT_PASSWORD can now be blank")
     return;
   }
+  
   if (!MATRIX_THREADS && CHATGPT_CONTEXT !== "room") throw Error("You must set CHATGPT_CONTEXT to 'room' if you set MATRIX_THREADS to false")
   const client: MatrixClient = new MatrixClient(MATRIX_HOMESERVER_URL, MATRIX_ACCESS_TOKEN, storage, cryptoStore);
 
@@ -52,15 +52,12 @@ async function main() {
     return;
   }
 
-  const clientOptions = {  // (Optional) Parameters as described in https://platform.openai.com/docs/api-reference/completions
-    modelOptions: {
-      model: CHATGPT_API_MODEL,  // The model is set to gpt-3.5-turbo by default
-    },
-    promptPrefix: wrapPrompt(CHATGPT_PROMPT_PREFIX),
-    debug: false,
+  const gptConfig = { // https://js.langchain.com/docs/api/chat_models_openai/classes/ChatOpenAI
+    modelName:CHATGPT_API_MODEL,
+    openAIApiKey: OPENAI_API_KEY
   };
 
-  const chatgpt = new ChatGPTClient(OPENAI_API_KEY, clientOptions, cacheOptions);
+  const langchain: ChatOpenAI = new ChatOpenAI(gptConfig);
 
   // Automatically join rooms the bot is invited to
   if (MATRIX_AUTOJOIN) AutojoinRoomsMixin.setupOnClient(client);
@@ -76,13 +73,13 @@ async function main() {
     if(MATRIX_WELCOME) {
       await client.sendMessage(roomId, {
         "msgtype": "m.notice",
-        "body": `👋 Hello, I'm ChatGPT bot! Matrix E2EE: ${MATRIX_ENCRYPTION}`,
+        "body": `👋 I am Pangea Bot! I’ll help you get started. | ¡Soy Pangea Bot! Te ayudaré a empezar.`,
       });
     }
   });
 
   // Prepare the command handler
-  const commands = new CommandHandler(client, chatgpt);
+  const commands = new CommandHandler(client, langchain);
   await commands.start();
 
   LogService.info("index", `Starting bot using ChatGPT model: ${CHATGPT_API_MODEL}`);

@@ -67,14 +67,3 @@ export type MatrixInviteEvent = CommonMatrixEventFields & {
   event_id: string
 }
 export type MembershipType = 'leave' | 'invite' | 'join'
-
-export type StoredConversationConfig = {
-  MATRIX_PREFIX?: string;
-  MATRIX_PREFIX_REPLY?: boolean;
-}
-
-export type StoredConversation = {
-    conversationId: string;
-    messageId: string;
-    config: StoredConversationConfig;
-}
