@@ -1,4 +1,3 @@
-import ChatGPTClient from '@waylaidwanderer/chatgpt-api';
 import Markdown from 'markdown-it';
 import { MatrixClient } from "matrix-bot-sdk";
 import { MessageEvent} from "./interfaces.js";

@@ -8,6 +8,7 @@ RUN yarn install --frozen-lockfile --production && yarn cache clean
 
 COPY ./tsconfig.json ./tsconfig.json
 COPY ./src ./src
+COPY ./docs ./docs
 RUN yarn build
 
 VOLUME /storage
