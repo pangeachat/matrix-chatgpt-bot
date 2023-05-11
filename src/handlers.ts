@@ -20,6 +20,7 @@ import { DirectoryLoader } from "langchain/document_loaders/fs/directory";
 import { MemoryVectorStore } from "langchain/vectorstores/memory";
 import { OpenAIEmbeddings } from "langchain/embeddings/openai";
 import { Document } from "langchain/dist/document.js";
+import { isContinueStatement } from "typescript";
 
 export default class CommandHandler {
 
@@ -113,15 +114,35 @@ export default class CommandHandler {
       //   const response = await chain.call({input_documents: relevantDocs, question:event.content.body});
       //   ai_response = response.output_text;
       // }else{
-      const roomContext = await this.client.getEventContext(roomId, event.event_id, 100);
+      const roomContext = await this.client.getEventContext(roomId, event.event_id, 1000);
       const messages = roomContext.before.filter(e => ((e.type == 'm.room.message') && (Date.now() - e.timestamp < 5400000)));
       const langchainArray = messages.map(this.createLangchainArray, this);
 
-      langchainArray.push(new SystemChatMessage(CHATGPT_PROMPT_PREFIX))
-      langchainArray.reverse()
-      langchainArray.push(new HumanChatMessage(event.content.body))
-      const response = await this.langchain.call(langchainArray)
-      ai_response = response.text
+      langchainArray.push(new SystemChatMessage(CHATGPT_PROMPT_PREFIX));
+      langchainArray.reverse();
+      langchainArray.push(new HumanChatMessage(event.content.body));
+
+      if (messages.length > 60){
+        ai_response = "I can't chat anymore right now. You can come back in an hour and a half. ";
+      }else if(messages.length == 60)
+      {
+        ai_response = "We've been talking for awhile. Why not try talking to a human?";
+      }else if(messages.length == 16)
+      {
+        await Promise.all([
+          this.client.setTyping(roomId, false, 500),
+          sendReply(this.client, roomId, this.getRootEventId(event), "I'm enjoying this conversation, but remember to chat with humans, too!", MATRIX_THREADS, MATRIX_RICH_TEXT),
+          this.client.setTyping(roomId, true, CHATGPT_TIMEOUT)
+        ]);
+        const response = await this.langchain.call(langchainArray);
+        ai_response = response.text;
+      }else
+      {
+        const response = await this.langchain.call(langchainArray);
+        ai_response = response.text;
+      }
+
+
       //}
 
       await Promise.all([

@@ -73,7 +73,7 @@ async function main() {
     if(MATRIX_WELCOME) {
       await client.sendMessage(roomId, {
         "msgtype": "m.notice",
-        "body": `👋 I am Pangea Bot! I’ll help you get started.`,
+        "body": `👋 I am Pangea Bot! You can try chatting with me.`,
       });
     }
   });
